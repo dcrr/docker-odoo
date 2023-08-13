@@ -38,10 +38,12 @@ check_config "db_password" "$PASSWORD"
 
 function check_odoo_repo() {
     if [ ! -d "$ODOO_SRC/odoo" ]; then
+        usermod -u 1000 odoo
+        groupmod -g 1000 odoo
         echo -e "\n-------- cloning odoo repository --------"
         cd $ODOO_SRC
         git clone https://github.com/odoo/odoo.git --depth=1 -b $ODOO_VERSION
-        chmod -R 777 "$ODOO_SRC/odoo"
+        chown -R odoo:odoo /home/odoo
    fi;
 }
 

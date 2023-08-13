@@ -22,7 +22,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl1.0-dev \
     node-less \
     python3-pip \
-    # python3-phonenumbers \
     python3-pyldap \
     python3-qrcode \
     python3-renderpm \
@@ -92,10 +91,6 @@ RUN mkdir -p src \
 # Set environment variable with src path
 ENV ODOO_SRC ${ODOO_PATH}/src
 
-RUN chown -R odoo:odoo ${ODOO_SRC} \
-    && chown -R odoo:odoo ${ODOO_PATH}/config \
-    && chown -R odoo:odoo ${ODOO_PATH}/data
-
 # Copy entrypoint script
 COPY ./entrypoint.sh /
 
@@ -104,16 +99,14 @@ COPY ./odoo.conf ${ODOO_PATH}
 
 # Set the default config file
 ENV ODOO_CONF_FILE ${ODOO_PATH}/odoo.conf
-RUN chown odoo ${ODOO_CONF_FILE}
+RUN chown odoo:odoo ${ODOO_CONF_FILE}
 
 # Expose odoo services
 EXPOSE 8069 8071 8072
 # Expose the debug port
 EXPOSE 4000
 
-# ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/entrypoint.sh"]
 
-# Setting the default user when running the container
-USER odoo
 
 CMD ["odoo"]
