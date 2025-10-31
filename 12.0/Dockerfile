@@ -1,7 +1,7 @@
 FROM debian:stretch
 LABEL org.opencontainers.image.authors="dianacarolinarojas@gmail.com"
 
-SHELL ["/bin/bash", "-xo", "pipefail", "-c"]
+SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 
 # Generate locale C.UTF-8 for postgres and general locale data
 ENV LANG C.UTF-8
