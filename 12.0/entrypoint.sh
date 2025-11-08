@@ -2,10 +2,6 @@
 
 set -e
 
-if [ -v PASSWORD_FILE ]; then
-    PASSWORD="$(< $PASSWORD_FILE)"
-fi
-
 ODOO_CONF=$ODOO_CONF_FILE
 if [ -f "$ODOO_PATH/config/odoo.conf" ]; then
     ODOO_CONF="$ODOO_PATH/config/odoo.conf"
@@ -14,10 +10,12 @@ fi
 echo -e "\n-------- ODOO_CONF $ODOO_CONF --------"
 
 # set the postgres database host, port, user and password according to the environment
-: ${HOST:=${DB_PORT_5432_TCP_ADDR:='db'}}
-: ${PORT:=${DB_PORT_5432_TCP_PORT:=5432}}
-: ${USER:=${DB_ENV_POSTGRES_USER:=${POSTGRES_USER:='odoo'}}}
-: ${PASSWORD:=${DB_ENV_POSTGRES_PASSWORD:=${POSTGRES_PASSWORD:='odoo'}}}
+: ${HOST:=${DB_HOST:='db'}}
+: ${PORT:=${DB_PORT:=5432}}
+: ${USER:=${DB_USER:=${POSTGRES_USER:='odoo'}}}
+: ${PASSWORD:=${DB_PASSWORD:=${POSTGRES_PASSWORD:='odoo'}}}
+: ${DATABASE:=${DB_NAME:='odoo'}}
+
 
 DB_ARGS=(" --config=${ODOO_CONF}")
 function check_config() {
@@ -35,21 +33,19 @@ check_config "db_host" "$HOST"
 check_config "db_port" "$PORT"
 check_config "db_user" "$USER"
 check_config "db_password" "$PASSWORD"
+check_config "database" "$DATABASE"
 
 function check_odoo_repo() {
     if [ ! -d "$ODOO_SRC/odoo" ]; then
-        usermod -u 1000 odoo
-        groupmod -g 1000 odoo
         echo -e "\n-------- cloning odoo repository --------"
-        cd $ODOO_SRC
+        cd "$ODOO_SRC"
         git clone https://github.com/odoo/odoo.git --depth=1 -b $ODOO_VERSION
-        chown -R odoo:odoo /home/odoo
    fi;
 }
 
 check_odoo_repo
-ODOO_EXEC="$ODOO_SRC/odoo/odoo-bin"
 
+ODOO_EXEC="$ODOO_SRC/odoo/odoo-bin"
 case "$1" in
     -- | odoo)
         shift

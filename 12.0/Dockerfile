@@ -65,6 +65,7 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     libldap2-dev \
     libssl-dev
 
+
 ENV ODOO_VERSION=12.0
 # download odoo requirements.txt file and install python dependencies
 RUN curl -SLo /tmp/requirements.txt https://raw.githubusercontent.com/odoo/odoo/${ODOO_VERSION}/requirements.txt \
@@ -74,12 +75,16 @@ RUN curl -SLo /tmp/requirements.txt https://raw.githubusercontent.com/odoo/odoo/
 
 
 # Add user and group odoo
-RUN adduser --system --quiet --shell=/bin/bash --home=/home/odoo --gecos 'ODOO' --group odoo
+# allow setting ODOO uid/gid at build time
+ARG ODOO_UID=1000
+ARG ODOO_GID=1000
+# Add user and group odoo with specific uid/gid
+RUN addgroup --gid ${ODOO_GID} odoo \
+ && adduser --system --uid ${ODOO_UID} --gid ${ODOO_GID} --shell=/bin/bash --home=/home/odoo --gecos 'ODOO' odoo
 
 # Set environment variable with root path
 ENV ODOO_PATH /home/odoo
 
-# WORKDIR /home/odoo/
 WORKDIR ${ODOO_PATH}
 
 # creating the directory structure for the Odoo installation
@@ -91,21 +96,21 @@ RUN mkdir -p src \
 ENV ODOO_SRC ${ODOO_PATH}/src
 
 # Copy entrypoint script
-COPY ./entrypoint.sh /
+COPY ./entrypoint.sh .
 
 # Copy Odoo configuration file
 COPY ./odoo.conf ${ODOO_PATH}
 
 # Set the default config file
 ENV ODOO_CONF_FILE ${ODOO_PATH}/odoo.conf
-RUN chown odoo:odoo ${ODOO_CONF_FILE}
+RUN chown ${ODOO_UID}:${ODOO_GID} ${ODOO_CONF_FILE}
 
 # Expose odoo services
 EXPOSE 8069 8071 8072
 # Expose the debug port
 EXPOSE 4000
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["./entrypoint.sh"]
 
 
 CMD ["odoo"]
