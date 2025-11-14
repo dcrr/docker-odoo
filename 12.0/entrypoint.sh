@@ -45,6 +45,53 @@ function check_odoo_repo() {
 
 check_odoo_repo
 
+# To install $ODOO_SRC/extra_addons/* requirements.txt
+install_addons_requirements() {
+    echo "Checking addon requirements in $ODOO_SRC ..."
+    # dir to store hashes inside container (not on user bind-mount)
+    HASH_DIR="/home/odoo"
+    mkdir -p "$HASH_DIR" 2>/dev/null || true
+
+    for d in "$ODOO_SRC/extra_addons"/*; do
+        [ -d "$d" ] || continue
+        name="$(basename "$d")"
+        # skip core odoo repo
+        [ "$name" = "odoo" ] && continue
+        req="$d/requirements.txt"
+        marker="$HASH_DIR/${name}.sha256"
+        if [ -f "$req" ]; then
+            # compute hash (fallback to mtime if sha256sum not available)
+            if command -v sha256sum >/dev/null 2>&1; then
+                hash="$(sha256sum "$req" | awk '{print $1}')"
+            else
+                hash="$(stat -c %Y "$req" 2>/dev/null || date +%s)"
+            fi
+
+            if [ ! -f "$marker" ] || [ "$(cat "$marker")" != "$hash" ]; then
+                echo "Installing python requirements for addon repo: $name"
+                if command -v pip3 >/dev/null 2>&1; then
+                    if pip3 install --no-cache-dir -r "$req"; then
+                        printf '%s' "$hash" > "$marker"
+                        echo "Requirements installed for $name"
+                    else
+                        echo "Warning: pip install failed for $req" >&2
+                    fi
+                else
+                    echo "Error: pip3 not found, cannot install $req" >&2
+                fi
+
+                if [ "$(id -u)" = "0" ]; then
+                    chown -R odoo:odoo "$d" "$marker" 2>/dev/null || true
+                fi
+            else
+                echo "Requirements up-to-date for $name"
+            fi
+        fi
+    done
+}
+
+install_addons_requirements
+
 ODOO_EXEC="$ODOO_SRC/odoo/odoo-bin"
 case "$1" in
     -- | odoo)
