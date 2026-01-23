@@ -96,6 +96,68 @@ install_addons_requirements() {
 install_addons_requirements
 
 ODOO_EXEC="$ODOO_SRC/odoo/odoo-bin"
+
+
+# Create a persistent wrapper script that runs Odoo with the DB args
+DB_ARGS_ESC=""
+for a in "${DB_ARGS[@]}"; do DB_ARGS_ESC="$DB_ARGS_ESC $(printf '%q' "$a")"; done
+
+# prefer /usr/local/bin, fallback to a user-writable bin in /home/odoo
+TARGET_DIR="/usr/local/bin"
+if [ ! -w "$TARGET_DIR" ]; then
+    TARGET_DIR="/home/odoo/.local/bin"
+    mkdir -p "$TARGET_DIR" 2>/dev/null || true
+fi
+ODOO_CMD="$TARGET_DIR/odoo_cmd"
+ODOO_BIN="$TARGET_DIR/odoo"
+
+# write wrapper with expanded ODOO_EXEC and DB args; keep "$@" literal
+cat > "$ODOO_CMD" <<EOF
+#!/bin/bash
+exec python3 "$ODOO_EXEC" $DB_ARGS_ESC "\$@"
+EOF
+
+chmod +x "$ODOO_CMD" 2>/dev/null || true
+
+# create a convenient 'odoo' entrypoint that delegates to odoo_cmd
+cat > "$ODOO_BIN" <<'EOF'
+#!/bin/bash
+exec "$(dirname "$0")/odoo_cmd" "$@"
+EOF
+
+chmod +x "$ODOO_BIN" 2>/dev/null || true
+
+# if running as root try to chown the wrapper and related files, ignore failures
+if [ "$(id -u)" = "0" ]; then
+    chown odoo:odoo "$ODOO_CMD" "$ODOO_BIN" 2>/dev/null || true
+fi
+
+# ensure interactive shells include the fallback bin in PATH and that login shells source .bashrc
+if [ "$TARGET_DIR" != "/usr/local/bin" ]; then
+    mkdir -p /home/odoo 2>/dev/null || true
+    if ! grep -q 'export PATH=.*\.local\/bin' /home/odoo/.bashrc 2>/dev/null; then
+        cat >> /home/odoo/.bashrc <<'BASHRC'
+# add local user bin to PATH
+export PATH="$HOME/.local/bin:$PATH"
+BASHRC
+        if [ "$(id -u)" = "0" ]; then
+            chown odoo:odoo /home/odoo/.bashrc 2>/dev/null || true
+        fi
+    fi
+    # ensure login shells source .bashrc
+    if [ ! -f /home/odoo/.bash_profile ]; then
+        cat > /home/odoo/.bash_profile <<'BASH_PROFILE'
+# Source .bashrc for login shells so PATH and helpers are available
+if [ -f "$HOME/.bashrc" ]; then
+  . "$HOME/.bashrc"
+fi
+BASH_PROFILE
+        if [ "$(id -u)" = "0" ]; then
+            chown odoo:odoo /home/odoo/.bash_profile 2>/dev/null || true
+        fi
+    fi
+fi
+
 case "$1" in
     -- | odoo)
         shift
