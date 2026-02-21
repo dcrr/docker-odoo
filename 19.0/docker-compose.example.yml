@@ -1,0 +1,23 @@
+services:
+  odoo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dianacarolinarojas/docker-odoo:19.0
+    container_name: odoo19
+    ports:
+      - "8069:8069"
+    env_file:
+      - .env 
+    volumes:
+      - ./config:/home/odoo/config
+      - ./src:/home/odoo/src
+      - ./data:/home/odoo/data
+    networks:
+      my_existing_network:
+        ipv4_address: ip_address
+
+networks:
+  my_existing_network:
+    external: true
+    name: network_name
