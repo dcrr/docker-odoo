@@ -6,3 +6,5 @@ docker-compose.yml
 src/
 config/
 data/
+
+*.code-workspace
