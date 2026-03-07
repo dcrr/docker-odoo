@@ -7,7 +7,7 @@ if [ -f "$ODOO_PATH/config/odoo.conf" ]; then
     ODOO_CONF="$ODOO_PATH/config/odoo.conf"
 fi
 
-echo -e "\n-------- ODOO_CONF $ODOO_CONF --------"
+echo -e "odoo.conf: $ODOO_CONF"
 
 # set the postgres database host, port, user and password according to the environment
 : ${HOST:=${DB_HOST:='db'}}
@@ -48,32 +48,67 @@ function check_odoo_repo() {
 
 check_odoo_repo
 
-# To install $ODOO_SRC/extra_addons/* requirements.txt
-install_addons_requirements() {
-    echo "Checking addon requirements in $ODOO_SRC ..."
-    # dir to store hashes inside container (not on user bind-mount)
-    HASH_DIR="/home/odoo"
+install_addons_requirements() {    
+    echo "Checking requirements for addons paths..."
+    addons_path=$(grep -E "^\s*addons_path\s*=" "$ODOO_CONF" | sed 's/.*=\s*//' | tr -d '\r')
+    if [ -z "$addons_path" ]; then
+        echo "Warning: addons_path not found in $ODOO_CONF"
+        return
+    fi
+
+    IFS=',' read -ra addon_dirs <<< "$addons_path"
+
+    # create a directory to store the hashes of the requirements files,
+    # so we can avoid re-installing if they haven't changed
+    HASH_DIR="$ODOO_PATH/config/requirements_hashes"
     mkdir -p "$HASH_DIR" 2>/dev/null || true
 
-    for d in "$ODOO_SRC/extra_addons"/*; do
-        [ -d "$d" ] || continue
-        name="$(basename "$d")"
-        # skip core odoo repo
-        [ "$name" = "odoo" ] && continue
-        req="$d/requirements.txt"
-        marker="$HASH_DIR/${name}.sha256"
+    # create a directory to persist pip installations 
+    # even if the container is deleted
+    PYTHON_USER_BASE="$ODOO_PATH/config/pip_cache"
+    mkdir -p "$PYTHON_USER_BASE" 2>/dev/null || true
+    
+    # export PYTHONUSERBASE so that pip installs to the persistent location
+    export PYTHONUSERBASE="$PYTHON_USER_BASE"
+    export PATH="$PYTHON_USER_BASE/bin:$PATH"
+    
+    for addon_path in "${addon_dirs[@]}"; do
+        # Remove leading/trailing whitespace
+        addon_path=$(echo "$addon_path" | xargs)
+        
+        # Skip empty paths
+        [ -z "$addon_path" ] && continue
+
+        # If path is relative, make it relative to ODOO_SRC
+        if [[ "$addon_path" != /* ]]; then
+            addon_path="$ODOO_SRC/$addon_path"
+        fi
+
+        [ -d "$addon_path" ] || continue
+
+        name="$(basename "$addon_path")"
+        if [ "$name" = "addons" ] || [ "$name" =  $ODOO_VERSION ]; then
+            continue
+        fi
+        
+        req="$addon_path/requirements.txt"
         if [ -f "$req" ]; then
-            # compute hash (fallback to mtime if sha256sum not available)
+            marker="$HASH_DIR/${name}.sha256"
+            # compute the hash of the current requirements.txt
             if command -v sha256sum >/dev/null 2>&1; then
                 hash="$(sha256sum "$req" | awk '{print $1}')"
             else
                 hash="$(stat -c %Y "$req" 2>/dev/null || date +%s)"
             fi
 
+            # if the requirements.txt hash has changed or does not exist, 
+            # install the requirements and update the hash
             if [ ! -f "$marker" ] || [ "$(cat "$marker")" != "$hash" ]; then
                 echo "Installing python requirements for addon repo: $name"
                 if command -v pip3 >/dev/null 2>&1; then
-                    if pip3 install --no-cache-dir -r "$req"; then
+                    # Use --user to install in $PYTHONUSERBASE (persisten volume) and 
+                    # --break-system-packages to allow installing alongside system packages without conflicts
+                    if pip3 install --user --break-system-packages -r "$req"; then
                         printf '%s' "$hash" > "$marker"
                         echo "Requirements installed for $name"
                     else
@@ -84,13 +119,13 @@ install_addons_requirements() {
                 fi
 
                 if [ "$(id -u)" = "0" ]; then
-                    chown -R odoo:odoo "$d" "$marker" 2>/dev/null || true
+                    chown -R odoo:odoo "$marker" "$req" "$PYTHON_USER_BASE" 2>/dev/null || true
                 fi
-            else
-                echo "Requirements up-to-date for $name"
             fi
         fi
     done
+
+    echo "End of requirements checking"
 }
 
 install_addons_requirements
