@@ -16,22 +16,159 @@ echo -e "odoo.conf: $ODOO_CONF"
 : ${PASSWORD:=${DB_PASSWORD:=${POSTGRES_PASSWORD:='odoo'}}}
 : ${DATABASE:=${DB_NAME:='odoo'}}
 
+# Initialize virtual environment path
+VENV_PATH="${ODOO_PATH}/config/venv"
+mkdir -p "${ODOO_PATH}/config" 2>/dev/null || true
+
+# Create virtual environment if it doesn't exist or is incomplete
+if [ ! -x "$VENV_PATH/bin/python3" ] || [ ! -f "$VENV_PATH/bin/activate" ]; then
+    if [ -d "$VENV_PATH" ]; then
+        echo "Rebuilding virtual environment at $VENV_PATH..."
+        python3 -m venv --clear "$VENV_PATH"
+    else
+        echo "Creating virtual environment at $VENV_PATH..."
+        python3 -m venv "$VENV_PATH"
+    fi
+    chown -R odoo:odoo "$VENV_PATH" 2>/dev/null || true
+fi
+
+# Activate virtual environment
+source "$VENV_PATH/bin/activate"
+
+HASH_DIR="$ODOO_PATH/config/requirements_hashes"
+mkdir -p "$HASH_DIR" 2>/dev/null || true
+
+echo "Bootstrapping pip in venv..."
+if ! python3 -m pip --version >/dev/null 2>&1; then
+    python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
+fi
+
+# Verify Python is from venv
+echo "Using Python from: $(which python3)"
+echo "Python version: $(python3 --version)"
+
+
+hash_file() {
+    local file="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$file" | awk '{print $1}'
+    else
+        stat -c %Y "$file" 2>/dev/null || date +%s
+    fi
+}
+
+hash_text() {
+    local value="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$value" | sha256sum | awk '{print $1}'
+    else
+        printf '%s' "$value" | md5sum | awk '{print $1}'
+    fi
+}
+
+is_python_dist_satisfied() {
+    local requirement="$1"
+    python3 - <<PYEOF >/dev/null 2>&1
+from pkg_resources import DistributionNotFound, VersionConflict, require
+
+try:
+    require(["$requirement"])
+except (DistributionNotFound, VersionConflict):
+    raise SystemExit(1)
+PYEOF
+}
+
+ensure_python_dist() {
+    local requirement="$1"
+
+    if is_python_dist_satisfied "$requirement"; then
+        return 0
+    fi
+
+    echo "Installing Python package $requirement in $VENV_PATH"
+    python3 -m pip install "$requirement"
+}
+
+ensure_python_tooling() {
+    ensure_python_dist "setuptools>=65.0,<81.0"
+    ensure_python_dist "wheel"
+    python3 -c "from pkg_resources import iter_entry_points; print('pkg_resources available')"
+}
+
+install_requirements_file() {
+    local req_file="$1"
+    local marker_name="$2"
+    local label="$3"
+    local marker hash
+
+    [ -f "$req_file" ] || return 0
+
+    marker="$HASH_DIR/${marker_name}.sha256"
+    hash="$(hash_file "$req_file")"
+
+    if [ -f "$marker" ] && [ "$(cat "$marker")" = "$hash" ]; then
+        echo "Requirements unchanged for $label"
+        return 0
+    fi
+
+    echo "Installing python requirements for $label"
+    python3 -m pip install -r "$req_file"
+    printf '%s' "$hash" > "$marker"
+
+    if [ "$(id -u)" = "0" ]; then
+        chown -R odoo:odoo "$marker" "$VENV_PATH" 2>/dev/null || true
+    fi
+}
+
+validate_python_distribution() {
+    local dist_name="$1"
+    python3 - <<PYEOF >/dev/null 2>&1
+from pkg_resources import DistributionNotFound, get_distribution
+
+try:
+    get_distribution("$dist_name")
+except DistributionNotFound:
+    raise SystemExit(1)
+PYEOF
+}
+
+repair_core_python_stack_if_needed() {
+    local missing=0
+
+    for dist_name in gevent zope.event zope.interface; do
+        if ! validate_python_distribution "$dist_name"; then
+            echo "Missing Python distribution metadata for $dist_name in $VENV_PATH"
+            missing=1
+        fi
+    done
+
+    if [ "$missing" -eq 0 ]; then
+        return 0
+    fi
+
+    echo "Reinstalling core event dependencies in venv..."
+    python3 -m pip install --force-reinstall \
+        "gevent==22.10.2" \
+        "greenlet==2.0.2" \
+        "zope.event" \
+        "zope.interface"
+}
+
+ensure_python_tooling
+echo "Virtual environment ready at $VENV_PATH"
+
 # Initialize DB_ARGS as a proper array
 DB_ARGS=("--config=${ODOO_CONF}")
 
 function check_config() {
     param="$1"
     value="$2"
-    # if the given parameter is not found in the ODOO_CONF file,
-    # add it to the DB_ARGS array with the given value.
     if ! grep -q -E "^\s*\b${param}\b\s*=" "$ODOO_CONF" ; then
         DB_ARGS+=("--${param}")
         DB_ARGS+=("${value}")
     fi
 }
 
-# pass postgres parameters as arguments to the odoo process 
-# if not present in the config file
 check_config "db_host" "$HOST"
 check_config "db_port" "$PORT"
 check_config "db_user" "$USER"
@@ -43,12 +180,12 @@ function check_odoo_repo() {
         echo -e "\n-------- cloning odoo repository --------"
         cd "$ODOO_SRC"
         git clone https://github.com/odoo/odoo.git --depth=1 -b $ODOO_VERSION
-   fi
+    fi
 }
 
 check_odoo_repo
 
-install_addons_requirements() {    
+install_addons_requirements() {
     echo "Checking requirements for addons paths..."
     addons_path=$(grep -E "^\s*addons_path\s*=" "$ODOO_CONF" | sed 's/.*=\s*//' | tr -d '\r')
     if [ -z "$addons_path" ]; then
@@ -58,28 +195,12 @@ install_addons_requirements() {
 
     IFS=',' read -ra addon_dirs <<< "$addons_path"
 
-    # create a directory to store the hashes of the requirements files,
-    # so we can avoid re-installing if they haven't changed
-    HASH_DIR="$ODOO_PATH/config/requirements_hashes"
-    mkdir -p "$HASH_DIR" 2>/dev/null || true
-
-    # create a directory to persist pip installations 
-    # even if the container is deleted
-    PYTHON_USER_BASE="$ODOO_PATH/config/pip_cache"
-    mkdir -p "$PYTHON_USER_BASE" 2>/dev/null || true
-    
-    # export PYTHONUSERBASE so that pip installs to the persistent location
-    export PYTHONUSERBASE="$PYTHON_USER_BASE"
-    export PATH="$PYTHON_USER_BASE/bin:$PATH"
-    
+    echo "Addons paths found: addon_dirs= ${addon_dirs[@]}"
     for addon_path in "${addon_dirs[@]}"; do
-        # Remove leading/trailing whitespace
         addon_path=$(echo "$addon_path" | xargs)
-        
-        # Skip empty paths
+
         [ -z "$addon_path" ] && continue
 
-        # If path is relative, make it relative to ODOO_SRC
         if [[ "$addon_path" != /* ]]; then
             addon_path="$ODOO_SRC/$addon_path"
         fi
@@ -87,40 +208,15 @@ install_addons_requirements() {
         [ -d "$addon_path" ] || continue
 
         name="$(basename "$addon_path")"
-        if [ "$name" = "addons" ] || [ "$name" =  $ODOO_VERSION ]; then
+        if [ "$name" = "addons" ] || [ "$name" = "$ODOO_VERSION" ]; then
             continue
         fi
-        
+
         req="$addon_path/requirements.txt"
         if [ -f "$req" ]; then
-            marker="$HASH_DIR/${name}.sha256"
-            # compute the hash of the current requirements.txt
-            if command -v sha256sum >/dev/null 2>&1; then
-                hash="$(sha256sum "$req" | awk '{print $1}')"
-            else
-                hash="$(stat -c %Y "$req" 2>/dev/null || date +%s)"
-            fi
-
-            # if the requirements.txt hash has changed or does not exist, 
-            # install the requirements and update the hash
-            if [ ! -f "$marker" ] || [ "$(cat "$marker")" != "$hash" ]; then
-                echo "Installing python requirements for addon repo: $name"
-                if command -v pip3 >/dev/null 2>&1; then
-                    # Use --user to install in $PYTHONUSERBASE (persisten volume) and 
-                    # --break-system-packages to allow installing alongside system packages without conflicts
-                    if pip3 install --user --break-system-packages -r "$req"; then
-                        printf '%s' "$hash" > "$marker"
-                        echo "Requirements installed for $name"
-                    else
-                        echo "Warning: pip install failed for $req" >&2
-                    fi
-                else
-                    echo "Error: pip3 not found, cannot install $req" >&2
-                fi
-
-                if [ "$(id -u)" = "0" ]; then
-                    chown -R odoo:odoo "$marker" "$req" "$PYTHON_USER_BASE" 2>/dev/null || true
-                fi
+            repo_key="$(hash_text "$addon_path")"
+            if ! install_requirements_file "$req" "addon_${repo_key}" "addon repo: $name"; then
+                echo "Warning: pip install failed for $req" >&2
             fi
         fi
     done
@@ -128,28 +224,36 @@ install_addons_requirements() {
     echo "End of requirements checking"
 }
 
+install_requirements_file "$ODOO_PATH/requirements.txt" "odoo_base" "Odoo base"
+repair_core_python_stack_if_needed
 install_addons_requirements
+ensure_python_tooling
 
 ODOO_EXEC="$ODOO_SRC/odoo/odoo-bin"
-
 
 # Create a persistent wrapper script that runs Odoo with the DB args
 DB_ARGS_ESC=""
 for a in "${DB_ARGS[@]}"; do DB_ARGS_ESC="$DB_ARGS_ESC $(printf '%q' "$a")"; done
 
-# prefer /usr/local/bin, fallback to a user-writable bin in /home/odoo
-TARGET_DIR="/usr/local/bin"
-if [ ! -w "$TARGET_DIR" ]; then
-    TARGET_DIR="/home/odoo/.local/bin"
-    mkdir -p "$TARGET_DIR" 2>/dev/null || true
-fi
+# Install the wrapper inside the venv so interactive shells can always find it.
+TARGET_DIR="$VENV_PATH/bin"
 ODOO_CMD="$TARGET_DIR/odoo_cmd"
 ODOO_BIN="$TARGET_DIR/odoo"
 
-# write wrapper with expanded ODOO_EXEC and DB args; keep "$@" literal
+# write wrapper with venv activation and ODOO_EXEC, ODOO_CONF and DB args
 cat > "$ODOO_CMD" <<EOF
 #!/bin/bash
-exec python3 "$ODOO_EXEC" $DB_ARGS_ESC "\$@"
+
+set -e
+
+source "$VENV_PATH/bin/activate"
+
+if ! python3 -c "import pkg_resources" >/dev/null 2>&1; then
+    python3 -m ensurepip --upgrade >/dev/null 2>&1 || true
+    python3 -m pip install --force-reinstall "setuptools>=65.0,<81.0"
+fi
+
+exec python3 "$ODOO_EXEC" --config="$ODOO_CONF" $DB_ARGS_ESC "\$@"
 EOF
 
 chmod +x "$ODOO_CMD" 2>/dev/null || true
@@ -162,49 +266,23 @@ EOF
 
 chmod +x "$ODOO_BIN" 2>/dev/null || true
 
-# if running as root try to chown the wrapper and related files, ignore failures
-if [ "$(id -u)" = "0" ]; then
-    chown odoo:odoo "$ODOO_CMD" "$ODOO_BIN" 2>/dev/null || true
-fi
+# Add venv to PATH so interactive shells can use `odoo`
+export PATH="$VENV_PATH/bin:$PATH"
 
-# ensure interactive shells include the fallback bin in PATH and that login shells source .bashrc
-if [ "$TARGET_DIR" != "/usr/local/bin" ]; then
-    mkdir -p /home/odoo 2>/dev/null || true
-    if ! grep -q 'export PATH=.*\.local\/bin' /home/odoo/.bashrc 2>/dev/null; then
-        cat >> /home/odoo/.bashrc <<'BASHRC'
-# add local user bin to PATH
-export PATH="$HOME/.local/bin:$PATH"
-BASHRC
-        if [ "$(id -u)" = "0" ]; then
-            chown odoo:odoo /home/odoo/.bashrc 2>/dev/null || true
-        fi
-    fi
-    # ensure login shells source .bashrc
-    if [ ! -f /home/odoo/.bash_profile ]; then
-        cat > /home/odoo/.bash_profile <<'BASH_PROFILE'
-# Source .bashrc for login shells so PATH and helpers are available
-if [ -f "$HOME/.bashrc" ]; then
-  . "$HOME/.bashrc"
-fi
-BASH_PROFILE
-        if [ "$(id -u)" = "0" ]; then
-            chown odoo:odoo /home/odoo/.bash_profile 2>/dev/null || true
-        fi
-    fi
+# If no arguments provided, start odoo server
+if [ $# -eq 0 ]; then
+    exec python3 "$ODOO_EXEC" "${DB_ARGS[@]}"
 fi
 
 case "$1" in
     -- | odoo)
         shift
-        if [[ "$1" == "scaffold" ]] ; then
-            exec python3 "$ODOO_EXEC" "$@"
-        else
-            exec python3 "$ODOO_EXEC" "$@" "${DB_ARGS[@]}"
-        fi
+        exec python3 "$ODOO_EXEC" "$@" "${DB_ARGS[@]}"
         ;;
     -*)
         exec python3 "$ODOO_EXEC" "$@" "${DB_ARGS[@]}"
         ;;
     *)
         exec "$@"
+        ;;
 esac

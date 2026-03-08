@@ -6,17 +6,23 @@ services:
     pull_policy: never
     image: dianacarolinarojas/docker-odoo:18.0
     container_name: odoo18
+    user: odoo
     ports:
       - "8069:8069"
     env_file:
       - .env 
     volumes:
-      - ./config:/home/odoo/config
+      - ./config/odoo.conf:/home/odoo/config/odoo.conf
+      - ./config/venv:/home/odoo/config/venv
+      - ./config/requirements_hashes:/home/odoo/config/requirements_hashes
       - ./src:/home/odoo/src
       - ./data:/home/odoo/data
     networks:
       my_existing_network:
         ipv4_address: ip_address
+    command: ["bash"]
+    tty: true
+    stdin_open: true
 
 networks:
   my_existing_network:
